@@ -6,6 +6,7 @@ from datetime import datetime
 from ultralytics import YOLO
 import numpy as np
 import easyocr
+import tempfile
 
 # Initialize EasyOCR
 reader = easyocr.Reader(['en'])
@@ -18,23 +19,8 @@ license_plate_detector = YOLO('license_plate_detector.pt')  # Replace with your 
 vehicles = [2, 3, 5, 7]
 
 # Streamlit app layout
-st.title("Live License Plate Detection with EasyOCR")
-run = st.checkbox('Run License Plate Detection')
-
-# Start video feed
-video_feed = st.empty()
-
-cap = cv2.VideoCapture(0)  # Use webcam
-
-# Reduce frame size for faster processing
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-
-# Frame rate control
-fps_limit = 10  # Limit to 10 FPS to make the stream smoother
-prev_time = 0
+st.title("License Plate Detection with EasyOCR")
+uploaded_video = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov"])
 
 # Data storage for detected plates
 detected_plates = []
@@ -45,67 +31,75 @@ table_placeholder = st.empty()
 # Create a placeholder dataframe for the table with separate Date and Time columns
 df = pd.DataFrame(columns=['License Plate', 'Date', 'Time'])
 
-# Read frames and process
-while run:
-    ret, frame = cap.read()
-    if not ret:
-        st.warning("Unable to capture video")
-        break
+if uploaded_video is not None:
+    # Create a temporary file to store the uploaded video
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_video.read())
+    
+    # Start video feed from the uploaded video
+    cap = cv2.VideoCapture(tfile.name)
 
-    # FPS limit
-    current_time = time.time()
-    if current_time - prev_time < 1.0 / fps_limit:
-        continue
-    prev_time = current_time
+    # Set up the video container in Streamlit
+    video_placeholder = st.empty()
 
-    # Detect vehicles
-    detections = coco_model(frame)[0]
-    for detection in detections.boxes.data.tolist():
-        x1, y1, x2, y2, score, class_id = detection
-        if int(class_id) in vehicles:
-            # Draw vehicle bounding box (optional)
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+    # Read frames and process
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            st.warning("Finished processing the video")
+            break
 
-            # Detect license plates
-            license_plates = license_plate_detector(frame)[0]
-            for license_plate in license_plates.boxes.data.tolist():
-                lx1, ly1, lx2, ly2, lscore, lclass_id = license_plate
+        # Detect vehicles
+        detections = coco_model(frame)[0]
+        for detection in detections.boxes.data.tolist():
+            x1, y1, x2, y2, score, class_id = detection
+            if int(class_id) in vehicles:
+                # Draw vehicle bounding box (optional)
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
-                # Draw license plate bounding box
-                cv2.rectangle(frame, (int(lx1), int(ly1)), (int(lx2), int(ly2)), (255, 0, 0), 2)
+                # Detect license plates
+                license_plates = license_plate_detector(frame)[0]
+                for license_plate in license_plates.boxes.data.tolist():
+                    lx1, ly1, lx2, ly2, lscore, lclass_id = license_plate
 
-                # Crop the license plate region
-                license_plate_crop = frame[int(ly1):int(ly2), int(lx1):int(lx2)]
+                    # Draw license plate bounding box
+                    cv2.rectangle(frame, (int(lx1), int(ly1)), (int(lx2), int(ly2)), (255, 0, 0), 2)
 
-                # Apply EasyOCR to the cropped license plate
-                license_plate_text = reader.readtext(license_plate_crop, detail=0)
+                    # Crop the license plate region
+                    license_plate_crop = frame[int(ly1):int(ly2), int(lx1):int(lx2)]
 
-                # If text is detected
-                if license_plate_text:
-                    # Get the current time and date separately
-                    now = datetime.now()
-                    current_date = now.strftime('%Y-%m-%d')
-                    current_time = now.strftime('%H:%M:%S')
+                    # Apply EasyOCR to the cropped license plate
+                    license_plate_text = reader.readtext(license_plate_crop, detail=0)
 
-                    # Save the detected license plate, date, and time
-                    detected_plates.append({
-                        'License Plate': license_plate_text[0],
-                        'Date': current_date,
-                        'Time': current_time
-                    })
+                    # If text is detected
+                    if license_plate_text:
+                        # Get the current time and date separately
+                        now = datetime.now()
+                        current_date = now.strftime('%Y-%m-%d')
+                        current_time = now.strftime('%H:%M:%S')
 
-                    # Limit the number of rows displayed
-                    if len(detected_plates) > 10:
-                        detected_plates = detected_plates[-10:]
+                        # Save the detected license plate, date, and time
+                        detected_plates.append({
+                            'License Plate': license_plate_text[0],
+                            'Date': current_date,
+                            'Time': current_time
+                        })
 
-                    # Update the dataframe with new data
-                    df = pd.DataFrame(detected_plates)
+                        # Limit the number of rows displayed
+                        if len(detected_plates) > 10:
+                            detected_plates = detected_plates[-10:]
 
-                    # Update the table in the Streamlit app
-                    table_placeholder.table(df)
+                        # Update the dataframe with new data
+                        df = pd.DataFrame(detected_plates)
 
-    # Display the video feed in Streamlit
-    video_feed.image(frame, channels="BGR")
+                        # Update the table in the Streamlit app
+                        table_placeholder.table(df)
 
-# Release video capture when done
-cap.release()
+        # Convert the frame from BGR to RGB (Streamlit uses RGB format)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Display the video in Streamlit
+        video_placeholder.image(frame_rgb)
+
+    # Release video capture when done
+    cap.release()
